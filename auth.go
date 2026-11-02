@@ -34,6 +34,9 @@ func authBegin(_ string) (any, error) {
 
 // authSubmit 校验提交的 sp_dc：能换到有效 token 即成功，返回凭据供宿主持久化。
 func authSubmit(_ *pluginsdk.Context, token string) (any, error) {
+	if token == "" {
+		return AuthState{State: "expired"}, nil
+	}
 	prev := client.spDC
 	client.spDC = token
 	client.dropToken()

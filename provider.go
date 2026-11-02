@@ -20,11 +20,8 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 		return nil, pluginsdk.Fail("internal", "Widevine 设备不可用，无法下载音频")
 	}
 	ctx := context.Background()
-	meta, err := client.getTrack(ctx, ref.ID)
+	meta, err := getTrackOrFail(ctx, ref.ID)
 	if err != nil {
-		if err == errNotFound {
-			return nil, pluginsdk.Fail("not_found", "track not found")
-		}
 		return nil, err
 	}
 
@@ -79,6 +76,15 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 	return map[string]any{"track": track}, nil
 }
 
+// getTrackOrFail 把"曲目不存在"转成宿主可识别的 not_found 错误。
+func getTrackOrFail(ctx context.Context, id string) (*apiTrack, error) {
+	meta, err := client.getTrack(ctx, id)
+	if errors.Is(err, errNotFound) {
+		return nil, pluginsdk.Fail("not_found", "track not found")
+	}
+	return meta, err
+}
+
 type countingWriter struct {
 	w io.Writer
 	n int64
@@ -94,11 +100,8 @@ func metadata(ref Ref) (any, error) {
 	if !client.configured() {
 		return nil, pluginsdk.Fail("auth_required", "未配置 sp_dc")
 	}
-	meta, err := client.getTrack(context.Background(), ref.ID)
+	meta, err := getTrackOrFail(context.Background(), ref.ID)
 	if err != nil {
-		if err == errNotFound {
-			return nil, pluginsdk.Fail("not_found", "track not found")
-		}
 		return nil, err
 	}
 	return map[string]any{"track": TrackSummary{
@@ -136,11 +139,8 @@ func lyricsFor(_ *pluginsdk.Context, ref Ref) (any, error) {
 		return nil, pluginsdk.Fail("auth_required", "未配置 sp_dc")
 	}
 	ctx := context.Background()
-	meta, err := client.getTrack(ctx, ref.ID)
+	meta, err := getTrackOrFail(ctx, ref.ID)
 	if err != nil {
-		if err == errNotFound {
-			return nil, pluginsdk.Fail("not_found", "track not found")
-		}
 		return nil, err
 	}
 	lrc, err := client.lyrics(ctx, ref.ID)

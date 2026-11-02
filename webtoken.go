@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,8 +75,7 @@ func fetchTOTPSecret(ctx context.Context, hc *http.Client) (version string, ciph
 	return bestVer, arr, "git.gay"
 }
 
-// generateTOTP computes the 6-digit HMAC-SHA1 TOTP Spotify expects, using the
-// raw secret bytes as the HMAC key and a 30-second step.
+// generateTOTP 生成 Spotify 使用的 6 位 TOTP（HMAC-SHA1，30 秒步长）。
 func generateTOTP(secret []byte, serverTimeMs int64) string {
 	counter := serverTimeMs / 1000 / 30
 	cb := make([]byte, 8)
@@ -88,7 +88,7 @@ func generateTOTP(secret []byte, serverTimeMs int64) string {
 	return fmt.Sprintf("%06d", bin%1000000)
 }
 
-// WebTokenResult carries the web-player token plus a diagnostic trace.
+// WebTokenResult 是换到的 web-player token 及换取过程的诊断步骤。
 type WebTokenResult struct {
 	AccessToken string
 	ClientID    string
@@ -98,21 +98,17 @@ type WebTokenResult struct {
 	TOTPWarning string // /api/token 成功但提示 TOTP 版本过期时的说明
 }
 
-// WebTokenFromCookie exchanges an sp_dc cookie for a web-player access token.
+// WebTokenFromCookie 用 sp_dc cookie 换取 web-player access token。
 func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*WebTokenResult, error) {
-	if hc == nil {
-		hc = http.DefaultClient
-	}
-	spDC = strings.TrimSpace(spDC)
 	if spDC == "" {
-		return nil, fmt.Errorf("native: empty sp_dc cookie")
+		return nil, errors.New("sp_dc 为空")
 	}
 	res := &WebTokenResult{}
 	add := func(f string, a ...any) { res.Steps = append(res.Steps, fmt.Sprintf(f, a...)) }
 
 	add("sp_dc 长度 %d", len(spDC))
 
-	// 1) server time (cookie-authenticated)
+	// 1) 服务器时间
 	stReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/api/server-time", nil)
 	cookieHeaders(stReq, spDC)
 	stResp, err := hc.Do(stReq)
@@ -129,12 +125,12 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	}
 	add("server-time %d", stj.ServerTime)
 
-	// 2) TOTP (derive the real HMAC key from the obfuscated cipher first)
+	// 2) TOTP
 	ver, cipher, source := fetchTOTPSecret(ctx, hc)
 	totp := generateTOTP(deriveSecret(cipher), stj.ServerTime*1000)
 	add("TOTP 密钥 v%s，来源 %s", ver, source)
 
-	// 3) /api/token (cookie + TOTP)
+	// 3) /api/token
 	tokURL := fmt.Sprintf("https://open.spotify.com/api/token?reason=init&productType=web-player&totp=%s&totpServer=%s&totpVer=%s", totp, totp, ver)
 	tReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, tokURL, nil)
 	cookieHeaders(tReq, spDC)
@@ -180,8 +176,7 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	res.ClientID = tj.ClientID
 	res.ExpiresAtMs = tj.AccessTokenExpirationTimestampMs
 
-	// Fetch a client-token: spclient calls (track-playback, storage-resolve,
-	// widevine-license) require it in addition to the Bearer token.
+	// spclient 接口（track-playback、storage-resolve、license）除 Bearer 外还需要 client-token
 	if tj.ClientID != "" {
 		if ct, cterr := fetchWebClientToken(ctx, hc, tj.ClientID); cterr == nil {
 			res.ClientToken = ct
@@ -193,9 +188,7 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	return res, nil
 }
 
-// fetchWebClientToken obtains a client-token for spclient calls. The web player
-// POSTs the client id + version to clienttoken.spotify.com and reads back a
-// granted token. Spotify accepts a JSON request/response for the web client.
+// fetchWebClientToken 向 clienttoken.spotify.com 换取 spclient 用的 client-token。
 func fetchWebClientToken(ctx context.Context, hc *http.Client, clientID string) (string, error) {
 	body := fmt.Sprintf(`{"client_data":{"client_version":%q,"client_id":%q,"js_sdk_data":{}}}`, webAppVersion, clientID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://clienttoken.spotify.com/v1/clienttoken", strings.NewReader(body))
@@ -238,7 +231,7 @@ func cookieHeaders(req *http.Request, spDC string) {
 	req.Header.Set("Accept", "application/json")
 }
 
-// snippet truncates a byte body for inclusion in error messages.
+// snippet 截断响应正文，用于错误信息。
 func snippet(b []byte) string {
 	s := strings.TrimSpace(string(b))
 	if len(s) > 200 {

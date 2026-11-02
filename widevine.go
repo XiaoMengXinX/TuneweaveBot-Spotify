@@ -135,7 +135,7 @@ func resolveMP4Files(ctx context.Context, hc *http.Client, auth WebAuth, trackID
 	return files, nil
 }
 
-// selectMP4 picks the file at-or-below the preferred bitrate (0 = highest).
+// selectMP4 选出不超过首选码率的最高档文件（0 表示最高）。
 func selectMP4(files []wvFile, preferredBitrate int) wvFile {
 	if preferredBitrate <= 0 {
 		return files[0] // already sorted high→low
@@ -211,7 +211,7 @@ func buildSpotifyPSSH(fileID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal pssh data: %w", err)
 	}
-	// Wrap in a full version-0 PSSH box: size|'pssh'|version+flags|systemid|datasize|data
+	// 完整的 version 0 PSSH box：size|'pssh'|version+flags|systemid|datasize|data
 	var buf bytes.Buffer
 	boxLen := 32 + len(inner)
 	_ = binary.Write(&buf, binary.BigEndian, uint32(boxLen))
@@ -234,7 +234,6 @@ func postLicense(ctx context.Context, hc *http.Client, auth WebAuth, payload []b
 	ApplyWebAuthHeaders(req, auth)
 	// 正文是二进制 protobuf，但服务端要求 Content-Type 为 application/json。
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, 0, nil, err
@@ -349,9 +348,9 @@ func downloadAndDecryptMP4(c *pluginsdk.Context, keys []*widevine.Key, cdnURL st
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind output scratch file: %w", err)
 	}
-	// 大块拷贝：dst 是 media sink，每次 Write 都是一次 base64 host-call，
-	// 用 512KB 缓冲把单轨的 host-call 次数从数百降到十几次。
-	if _, err := io.CopyBuffer(dst, out, make([]byte, 512<<10)); err != nil {
+	// dst 是 media sink，每次 Write 都是一次 base64 host-call，大块拷贝减少调用次数。
+	// 包一层 Reader，避免 *os.File 的 WriteTo 绕过这里的缓冲区。
+	if _, err := io.CopyBuffer(dst, struct{ io.Reader }{out}, make([]byte, 512<<10)); err != nil {
 		return fmt.Errorf("write decrypted output: %w", err)
 	}
 	return nil

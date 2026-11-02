@@ -10,23 +10,20 @@ import (
 
 func LoadWVDeviceBytes(data []byte) (*widevine.Device, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("native: empty Widevine device data — set [plugins.spotify] wvd_path to a .wvd file (needed to decrypt Spotify AAC)")
+		return nil, fmt.Errorf("Widevine 设备数据为空")
 	}
 	dev, err := widevine.NewDevice(widevine.FromWVD(bytes.NewReader(data)))
 	if err != nil {
-		return nil, fmt.Errorf("native: load wvd: %w", err)
+		return nil, fmt.Errorf("解析 .wvd 失败: %w", err)
 	}
 	return dev, nil
 }
 
 // LoadWVDeviceFile 读取沙箱内的 .wvd，路径相对 [plugins] fs_dir 的只读挂载。
 func LoadWVDeviceFile(path string) (*widevine.Device, error) {
-	if path == "" {
-		return nil, fmt.Errorf("native: no Widevine device configured — set [plugins.spotify] wvd_path to a .wvd file (needed to decrypt Spotify AAC)")
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("native: open wvd %q: %w", path, err)
+		return nil, fmt.Errorf("读取 .wvd %q 失败: %w", path, err)
 	}
 	return LoadWVDeviceBytes(data)
 }
