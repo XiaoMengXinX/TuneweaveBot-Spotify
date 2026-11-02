@@ -1,0 +1,16 @@
+github.com/Eyevinn/mp4ff v0.61.0 h1:uX3GBauEouxuGepRbv15JB7X2RyVyE2EZEfLpgimL6o=
+github.com/Eyevinn/mp4ff v0.61.0/go.mod h1:97zsDIJUiDTYqKpqq/b1K9foamxXmvsgE4GdPrPK3ks=
+github.com/chmike/cmac-go v1.1.0 h1:aF73ZAEx9N2WdQc93DOJ2fMsBDAGqUtuenjMJMb3kEI=
+github.com/chmike/cmac-go v1.1.0/go.mod h1:wcIN7NRqWSKGuORzd4dReBkoBDE9ZBqfyTVxyDxGeUw=
+github.com/go-test/deep v1.1.0 h1:WOcxcdHcvdgThNXjw0t76K42FXTU7HpNQWHpA2HHNlg=
+github.com/go-test/deep v1.1.0/go.mod h1:5C2ZWiW0ErCdrYzpqxLbTX7MG14M9iiw8DgHncVwcsE=
+github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/iyear/gowidevine v0.1.3 h1:a0D85vBGHdpeUGaolWboQiT12bRcRXg8LOezHXkaM+o=
+github.com/iyear/gowidevine v0.1.3/go.mod h1:fGlzuSLkxTMIRXF8firHWpgXcAcE1E4H7T0xE0fN4B8=
+github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
+github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
+go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+google.golang.org/protobuf v1.36.12 h1:pJOKDDOyeXErUroCihFAd5LQuwXBSpVnKGrj5o/fwxc=
+google.golang.org/protobuf v1.36.12/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
