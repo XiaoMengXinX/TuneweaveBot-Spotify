@@ -13,40 +13,25 @@ import (
 	"strings"
 )
 
-// Web-player token path. Unlike an OAuth token (which returns metadata WITHOUT
-// the streaming `file` array), the web-player access token obtained from an
-// sp_dc cookie is authorized to see file ids — this is what votify and the
-// Spotify web player itself use. The token is minted via a TOTP-signed call to
-// open.spotify.com/api/token, the same flow the web player runs in-browser.
-
 const (
 	totpSecretDictURL = "https://git.gay/thereallo/totp-secrets/raw/branch/main/secrets/secretDict.json"
 	webUA             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 	webAppVersion     = "1.2.87.27.ga2033a72"
 )
 
-// builtinTOTPSecret is the version-61 secret, used as a fallback when the live
-// secret dictionary can't be fetched. Spotify rotates these every few months,
-// so the runtime fetch (fetchTOTPSecret) is preferred; this just keeps the path
-// working offline / if the dict host is down.
+// builtinTOTP* 是拉取在线密钥字典失败时的回落值；Spotify 会定期轮换密钥。
 var (
 	builtinTOTPSecretVer = "61"
 	builtinTOTPCipher    = []int{44, 55, 47, 42, 70, 40, 34, 114, 76, 74, 50, 111, 120, 97, 75, 76, 94, 102, 43, 69, 49, 120, 118, 80, 64, 78}
 )
 
-// WebAuth carries the two credentials every spclient call needs: the Bearer
-// access token and the client-token. Both come from the web-player token flow.
 type WebAuth struct {
 	Bearer      string
 	ClientToken string
 }
 
-// deriveSecret turns Spotify's obfuscated TOTP cipher (the byte array from the
-// secret dictionary) into the actual HMAC-SHA1 key: XOR each byte with
-// ((index % 33) + 9), format each result as a variable-width decimal string,
-// concatenate, and ASCII-encode. The official web player uses this exact
-// derivation; feeding the raw bytes in as the key (a naive port) fails with a
-// generic 400 from /api/token.
+// deriveSecret 把字典里混淆过的密钥还原成 HMAC-SHA1 key：
+// 第 i 字节异或 (i%33)+9，转十进制字符串后拼接。
 func deriveSecret(cipher []int) []byte {
 	var sb strings.Builder
 	for i, b := range cipher {

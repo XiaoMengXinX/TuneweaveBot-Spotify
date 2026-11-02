@@ -35,7 +35,8 @@ func manifest() Manifest {
 		Commands: []Command{
 			{Name: "spotify", Description: "使用 Spotify 点歌"},
 		},
-		Resources: Resources{MemoryMB: 256, Instances: 1},
+		Resources: Resources{MemoryMB: 128, Instances: 4},
+		LinkHosts: []string{"open.spotify.com", "play.spotify.com"},
 		HTTPAllowedHosts: []string{
 			"open.spotify.com",
 			"accounts.spotify.com",
@@ -51,7 +52,7 @@ func manifest() Manifest {
 		},
 		ConfigSchema: []ConfigField{
 			{Key: "sp_dc", Type: "string", Default: "", Secret: true, Comment: "登录 open.spotify.com 后 Cookie 中的 sp_dc，用 /login spotify token 也可提交"},
-			{Key: "wvd_path", Type: "string", Default: "", Comment: "Widevine L3 设备文件(.wvd)路径，相对 [plugins] fs_dir 只读挂载目录；解密音频必需，留空用内置公开设备（可能被封）"},
+			{Key: "wvd_path", Type: "string", Default: "", Comment: "Widevine L3 设备文件(.wvd)路径，相对 [plugins] fs_dir 只读挂载目录；留空使用内置公开设备（可能被吊销）"},
 			{Key: "market", Type: "string", Default: "US", Comment: "元数据/搜索的地区代码(ISO 3166-1 alpha-2)"},
 		},
 	}
@@ -92,6 +93,14 @@ func handle(c *pluginsdk.Context) (any, error) {
 			return nil, err
 		}
 		return resolve(c, in.Ref)
+	case "provider.metadata":
+		var in struct {
+			Ref Ref `json:"ref"`
+		}
+		if err := c.Decode(&in); err != nil {
+			return nil, err
+		}
+		return metadata(in.Ref)
 	case "provider.search":
 		var in struct {
 			Keyword string `json:"keyword"`
@@ -163,7 +172,7 @@ func initPlugin(c *pluginsdk.Context) (any, error) {
 	}
 
 	device := loadDevice(c)
-	client = newAPIClient(pluginsdk.NewHTTPClient(), spDC, cfg.Market, device)
+	client = newAPIClient(pluginsdk.NewHTTPClient(), spDC, cfg.Market, device, c)
 	return map[string]any{}, nil
 }
 

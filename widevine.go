@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -10,23 +11,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
 
+	"github.com/Eyevinn/mp4ff/mp4"
 	widevine "github.com/iyear/gowidevine"
 	"github.com/iyear/gowidevine/widevinepb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/XiaoMengXinX/TuneweaveBot/pluginsdk"
 )
 
-// spclientHost is the generic spclient host that fronts metadata,
-// storage-resolve, track-playback, and the widevine-license endpoints.
 const spclientHost = "https://spclient.wg.spotify.com"
 
-// webHeaders applies the headers Spotify's web player sends on every spclient
-// call. App-Platform / Spotify-App-Version / the Origin+Referer pair identify
-// the request as coming from the in-browser player; without them spclient
-// rejects the web-player token.
+// scratchDir 是沙箱内唯一可写的挂载点。
+const scratchDir = "/scratch"
+
+// webHeaders 模拟 web player 的请求头，缺少时 spclient 会拒绝 web-player token。
 func webHeaders(req *http.Request, token string) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -43,8 +44,6 @@ func webHeaders(req *http.Request, token string) {
 	req.Header.Set("User-Agent", webUA)
 }
 
-// ApplyWebAuthHeaders applies the headers used by Spotify's web player,
-// including the client-token required by Pathfinder and spclient endpoints.
 func ApplyWebAuthHeaders(req *http.Request, auth WebAuth) {
 	webHeaders(req, auth.Bearer)
 	if auth.ClientToken != "" {
@@ -52,8 +51,7 @@ func ApplyWebAuthHeaders(req *http.Request, auth WebAuth) {
 	}
 }
 
-// getRawAuth performs a GET with Bearer + client-token + web-player headers,
-// returning the raw body and status without treating non-200 as an error.
+// getRawAuth 不把非 200 视为错误，由调用方按状态码处理。
 func getRawAuth(ctx context.Context, hc *http.Client, url string, auth WebAuth) ([]byte, int, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	ApplyWebAuthHeaders(req, auth)
@@ -66,15 +64,12 @@ func getRawAuth(ctx context.Context, hc *http.Client, url string, auth WebAuth) 
 	return b, resp.StatusCode, nil
 }
 
-// wvFile is a resolved MP4 (Widevine CENC / AAC) audio file for a track.
 type wvFile struct {
 	FileID  string // 40-hex file id
 	Format  string // storage-resolve format id: "11"=MP4_256, "10"=MP4_128
 	Bitrate int    // bits per second, derived from Format for selection/labeling
 }
 
-// mp4FormatBitrate maps Spotify's MP4 storage-resolve format id to its nominal
-// AAC bitrate. "11"=MP4_256, "10"=MP4_128 (verified against votify constants).
 func mp4FormatBitrate(format string) int {
 	switch format {
 	case "11":
@@ -86,11 +81,7 @@ func mp4FormatBitrate(format string) int {
 	}
 }
 
-// trackPlaybackResp models the track-playback media manifest. Spotify returns
-// the MP4 (Widevine) file ids here in 2026; the old JSON metadata `file[]`
-// array no longer carries them for web-token clients. `media` is an OBJECT
-// keyed by an opaque id (not an array); each entry carries the storage-resolve
-// format id ("10"/"11") in its `format` field.
+// trackPlaybackResp 中 media 是以不透明 id 为键的对象。
 type trackPlaybackResp struct {
 	Media map[string]struct {
 		Item struct {
@@ -104,8 +95,7 @@ type trackPlaybackResp struct {
 	} `json:"media"`
 }
 
-// resolveMP4Files returns the available MP4/Widevine audio files for a track,
-// highest bitrate first. It uses the track-playback media manifest.
+// resolveMP4Files 按码率从高到低返回曲目可用的 MP4 文件。
 func resolveMP4Files(ctx context.Context, hc *http.Client, auth WebAuth, trackID string) ([]wvFile, error) {
 	tpURL := fmt.Sprintf("%s/track-playback/v1/media/spotify:track:%s?manifestFileFormat=file_ids_mp4", spclientHost, trackID)
 	raw, status, err := getRawAuth(ctx, hc, tpURL, auth)
@@ -157,9 +147,7 @@ func selectMP4(files []wvFile, preferredBitrate int) wvFile {
 	return best
 }
 
-// selectMP4Candidates returns the preferred file followed by lower-bitrate
-// fallbacks. Spotify Free accounts can obtain AAC 128k licenses but reject
-// AAC 256k, so callers requesting the highest tier must be able to retry 128k.
+// selectMP4Candidates 返回首选文件及更低码率的回落项：Free 账号拿不到 256k license。
 func selectMP4Candidates(files []wvFile, preferredBitrate int) []wvFile {
 	if len(files) == 0 {
 		return nil
@@ -175,11 +163,6 @@ func selectMP4Candidates(files []wvFile, preferredBitrate int) []wvFile {
 	return candidates
 }
 
-// storageResolveMP4 resolves an MP4 file_id to a CDN URL via storage-resolve v2.
-// The format id ("11"=MP4_256, "10"=MP4_128) comes straight from the
-// track-playback manifest entry, so it matches the file_id exactly (verified
-// against votify's FORMAT_ID_MAP). The version/product/platform query params
-// mirror the web player's call.
 func storageResolveMP4(ctx context.Context, hc *http.Client, auth WebAuth, fileID, format string) (string, error) {
 	if format == "" {
 		return "", fmt.Errorf("storage-resolve: empty format id for file %s", fileID)
@@ -203,18 +186,8 @@ func storageResolveMP4(ctx context.Context, hc *http.Client, auth WebAuth, fileI
 	return sr.CDNURL[0], nil
 }
 
-// buildSpotifyPSSH constructs a WidevinePsshData protobuf locally from a
-// 40-hex Spotify file_id, matching votify's _get_pssh() exactly. This is
-// preferred over the seektable CDN because votify (which works) uses this
-// same local construction, and the seektable PSSH may have subtle field
-// differences (e.g. missing protection_scheme) that cause a 403.
-//
-// Fields (all five, matching votify):
-//   - algorithm = AESCTR
-//   - key_ids = [first 16 bytes of file_id]
-//   - provider = "spotify"
-//   - content_id = full file_id bytes (20 bytes)
-//   - protection_scheme = 0x636E6363 ('cenc' little-endian)
+// buildSpotifyPSSH 由 40 位十六进制 file_id 构造 PSSH box。五个字段缺一不可，
+// 否则 license 服务器返回 403。
 func buildSpotifyPSSH(fileID string) ([]byte, error) {
 	raw, err := hex.DecodeString(fileID)
 	if err != nil || len(raw) < 16 {
@@ -243,23 +216,16 @@ func buildSpotifyPSSH(fileID string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// widevineSystemID is the Widevine DRM system ID.
 var widevineSystemID = []byte{
 	0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
 	0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
 }
 
-// postLicense sends a raw Widevine message (challenge or service-cert request)
-// to Spotify's license endpoint and returns the raw response body + status.
 func postLicense(ctx context.Context, hc *http.Client, auth WebAuth, payload []byte) ([]byte, int, http.Header, error) {
 	licURL := fmt.Sprintf("%s/widevine-license/v1/audio/license", spclientHost)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, licURL, bytes.NewReader(payload))
 	ApplyWebAuthHeaders(req, auth)
-	// votify (which works) posts the raw protobuf challenge but REUSES the
-	// default web-player client headers — httpx does NOT override a preset
-	// content-type when you pass raw bytes, so the binary challenge actually
-	// goes out as content-type/accept: application/json. We match that exactly;
-	// octet-stream (a "more correct" guess) is NOT what the working client sends.
+	// 正文是二进制 protobuf，但服务端要求 Content-Type 为 application/json。
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
@@ -271,9 +237,7 @@ func postLicense(ctx context.Context, hc *http.Client, auth WebAuth, payload []b
 	return body, resp.StatusCode, resp.Header, nil
 }
 
-// fetchProductState queries Spotify's product_state endpoint and returns the
-// account tier ("free", "premium", ...). It is used for quality selection and
-// to explain license failures.
+// fetchProductState 返回账号等级（free/premium 等），用于诊断 license 失败。
 func fetchProductState(ctx context.Context, hc *http.Client, auth WebAuth) (string, error) {
 	url := spclientHost + "/melody/v1/product_state"
 	body, status, err := getRawAuth(ctx, hc, url, auth)
@@ -292,12 +256,7 @@ func fetchProductState(ctx context.Context, hc *http.Client, auth WebAuth) (stri
 	return ps.Product, nil
 }
 
-// acquireContentKey runs the Widevine flow against Spotify's license server and
-// returns the CONTENT keys for the given PSSH. It matches votify EXACTLY:
-// non-privacy mode (plaintext ClientID — votify never sets a service certificate,
-// so pywidevine's default privacy_mode=True is a no-op) and a STREAMING license
-// type. The decisive variable that was wrong before was the PSSH shape, not the
-// privacy mode: the seektable PSSH lacked provider/content_id/protection_scheme.
+// acquireContentKey 以非 privacy 模式请求 STREAMING license，返回 CONTENT key。
 func acquireContentKey(ctx context.Context, hc *http.Client, auth WebAuth, device *widevine.Device, psshBytes []byte, bitrate int) ([]*widevine.Key, error) {
 	pssh, err := widevine.NewPSSH(psshBytes)
 	if err != nil {
@@ -348,56 +307,34 @@ func acquireContentKey(ctx context.Context, hc *http.Client, auth WebAuth, devic
 	return keys, nil
 }
 
-// downloadAndDecryptMP4 fetches the encrypted CENC MP4 from the CDN and decrypts
-// it in pure Go, writing the playable MP4 (AAC) stream to dst.
-//
-// Both ciphertext and plaintext are spooled to scratch files instead of being
-// buffered in memory: holding ciphertext + plaintext + the returned copy at
-// once is three times the track size, which blows the wasm instance's memory.
-// wasip1 has a writable tmp fs, so os.CreateTemp works here. Decryption writes
-// to its own scratch file and only copies to dst after it fully succeeds, so a
-// mid-decrypt failure never leaves partial bytes in dst (callers can retry a
-// lower quality on the same dst). (gowidevine still parses the whole mp4
-// internally, so one copy lives inside the library — not ours to fix.)
-func downloadAndDecryptMP4(ctx context.Context, hc *http.Client, cdnURL string, keys []*widevine.Key, dst io.Writer) error {
-	parsed, err := url.Parse(cdnURL)
-	if err != nil {
-		return fmt.Errorf("bad cdn url: %w", err)
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	resp, err := hc.Do(req)
+// downloadAndDecryptMP4 由宿主下载密文到 scratch，在插件内解密到另一个 scratch
+// 文件，完全成功后才拷贝到 dst，保证失败时 dst 没有残留，可换码率重试。
+func downloadAndDecryptMP4(c *pluginsdk.Context, keys []*widevine.Key, cdnURL string, opts *pluginsdk.DownloadOptions, dst io.Writer) error {
+	dl, err := c.DownloadToScratch(cdnURL, opts)
 	if err != nil {
 		return fmt.Errorf("cdn download: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("cdn HTTP %d: %s", resp.StatusCode, string(b))
-	}
+	defer os.Remove(dl.Path)
 
-	tmp, err := os.CreateTemp("", "spotify-cenc-*.mp4")
+	tmp, err := os.Open(dl.Path)
 	if err != nil {
-		return fmt.Errorf("create scratch file: %w", err)
+		return fmt.Errorf("open scratch file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
-		return fmt.Errorf("read cdn body: %w", err)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind scratch file: %w", err)
-	}
-
-	out, err := os.CreateTemp("", "spotify-aac-*.mp4")
+	out, err := os.CreateTemp(scratchDir, "spotify-aac-*.mp4")
 	if err != nil {
 		return fmt.Errorf("create output scratch file: %w", err)
 	}
 	defer os.Remove(out.Name())
 	defer out.Close()
 
-	if err := widevine.DecryptMP4Auto(tmp, keys, out); err != nil {
+	bw := bufio.NewWriterSize(out, 512<<10)
+	if err := decryptMP4Stream(bufio.NewReaderSize(tmp, 512<<10), keys, bw); err != nil {
 		return fmt.Errorf("decrypt mp4: %w", err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("write decrypted output: %w", err)
 	}
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind output scratch file: %w", err)
@@ -410,23 +347,91 @@ func downloadAndDecryptMP4(ctx context.Context, hc *http.Client, cdnURL string, 
 	return nil
 }
 
-// DownloadAndDecrypt runs the full Widevine AAC chain for a track with a single
-// configured device and streams the decrypted, playable MP4 (AAC) to dst. It
-// returns the selected bitrate (bits per second).
-//
-// preferredBitrate selects the initial tier in kbps (0 = highest). Lower
-// available tiers are tried when a higher tier is unavailable for the account
-// (a Free account rejecting AAC 256k falls back to 128k). dst only ever
-// receives a complete stream: downloadAndDecryptMP4 buffers to scratch and
-// copies to dst only after a candidate fully decrypts.
-func DownloadAndDecrypt(ctx context.Context, hc *http.Client, auth WebAuth, device *widevine.Device, trackID string, preferredBitrate int, dst io.Writer) (bitrate int, err error) {
-	if hc == nil {
-		hc = http.DefaultClient
+// decryptMP4Stream 逐个 moof+mdat 分片解密分片 MP4，内存峰值只有一个分片，与音轨时长无关。
+// sidx 记录的是密文分片大小，解密移除 senc/saiz/saio 后失效，因此不输出。
+func decryptMP4Stream(r io.Reader, keys []*widevine.Key, w io.Writer) error {
+	var key []byte
+	for _, k := range keys {
+		if k.Type == widevinepb.License_KeyContainer_CONTENT {
+			key = k.Key
+			break
+		}
 	}
-	if device == nil {
-		return 0, fmt.Errorf("widevine device not configured")
+	if key == nil {
+		return errors.New("license has no content key")
 	}
 
+	init := mp4.NewMP4Init()
+	var (
+		di      mp4.DecryptInfo
+		frag    *mp4.Fragment
+		pending []mp4.Box // moov 之后、moof 之前的盒子（emsg、prft 等），归入下一个分片
+		pos     uint64
+	)
+	for {
+		box, err := mp4.DecodeBox(pos, r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		pos += box.Size()
+
+		switch b := box.(type) {
+		case *mp4.MoovBox:
+			init.AddChild(b)
+			if di, err = mp4.DecryptInit(init); err != nil {
+				return fmt.Errorf("decrypt init: %w", err)
+			}
+			if err := init.Encode(w); err != nil {
+				return err
+			}
+		case *mp4.SidxBox, *mp4.MfraBox:
+		case *mp4.StypBox:
+			if err := b.Encode(w); err != nil {
+				return err
+			}
+		case *mp4.MoofBox:
+			if init.Moov == nil {
+				return errors.New("moof before moov")
+			}
+			frag = mp4.NewFragment()
+			for _, p := range pending {
+				frag.AddChild(p)
+			}
+			pending = pending[:0]
+			frag.AddChild(b)
+		case *mp4.MdatBox:
+			if frag == nil {
+				return errors.New("mdat without moof")
+			}
+			frag.AddChild(b)
+			// 允许未加密分片（无 senc）与加密分片混排
+			if err := mp4.DecryptFragment(frag, di, key); err != nil && err.Error() != "no senc box in traf" {
+				return fmt.Errorf("decrypt fragment at %d: %w", b.StartPos, err)
+			}
+			if err := frag.Encode(w); err != nil {
+				return err
+			}
+			frag = nil
+		default:
+			if init.Moov == nil {
+				init.AddChild(b)
+			} else {
+				pending = append(pending, b)
+			}
+		}
+	}
+	if init.Moov == nil {
+		return errors.New("no moov box")
+	}
+	return nil
+}
+
+// DownloadAndDecrypt 把解密后的 MP4(AAC) 写入 dst，返回实际码率（bps）。
+// preferredBitrate 单位 kbps，0 表示最高；失败时依次尝试更低码率。
+func DownloadAndDecrypt(ctx context.Context, c *pluginsdk.Context, hc *http.Client, auth WebAuth, device *widevine.Device, trackID string, preferredBitrate int, opts *pluginsdk.DownloadOptions, dst io.Writer) (bitrate int, err error) {
 	files, err := resolveMP4Files(ctx, hc, auth, trackID)
 	if err != nil {
 		return 0, err
@@ -453,7 +458,7 @@ func DownloadAndDecrypt(ctx context.Context, hc *http.Client, auth WebAuth, devi
 			attemptErrs = append(attemptErrs, fmt.Errorf("%dk license: %w", file.Bitrate/1000, keyErr))
 			continue
 		}
-		if decryptErr := downloadAndDecryptMP4(ctx, hc, cdnURL, keys, dst); decryptErr != nil {
+		if decryptErr := downloadAndDecryptMP4(c, keys, cdnURL, opts, dst); decryptErr != nil {
 			attemptErrs = append(attemptErrs, fmt.Errorf("%dk decrypt: %w", file.Bitrate/1000, decryptErr))
 			continue
 		}

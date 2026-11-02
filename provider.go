@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 
 	"github.com/XiaoMengXinX/TuneweaveBot/pluginsdk"
 )
@@ -14,7 +16,7 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 		return nil, pluginsdk.Fail("auth_required", "未配置 sp_dc，请用 /login spotify token 登录")
 	}
 	if client.device == nil {
-		return nil, pluginsdk.Fail("internal", "未配置 Widevine 设备(.wvd)，无法下载音频")
+		return nil, pluginsdk.Fail("internal", "Widevine 设备不可用，无法下载音频")
 	}
 	ctx := context.Background()
 	meta, err := client.getTrack(ctx, ref.ID)
@@ -34,7 +36,9 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 		_ = sink.Abort()
 		return nil, err
 	}
-	bitrate, derr := DownloadAndDecrypt(ctx, client.http, auth, client.device, ref.ID, qualityBitrate, sink)
+	opts := &pluginsdk.DownloadOptions{Title: meta.Name, Album: meta.AlbumName}
+	out := &countingWriter{w: sink}
+	bitrate, derr := DownloadAndDecrypt(ctx, c, client.http, auth, client.device, ref.ID, qualityBitrate, opts, out)
 	if derr != nil {
 		_ = sink.Abort()
 		return nil, pluginsdk.Fail("internal", derr.Error())
@@ -42,20 +46,62 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 	if err := sink.Close(); err != nil {
 		return nil, err
 	}
+	// 与其他 provider 一致报告平均码率（bps）；缺少时长时用格式标称码率
+	if meta.DurationMs > 0 {
+		bitrate = int(out.n * 8 * 1000 / int64(meta.DurationMs))
+	}
+	tagPayload, err := json.Marshal(buildTags(ctx, auth, meta))
+	if err != nil {
+		return nil, err
+	}
 
+	// 不设 Size：宿主以落盘后的明文文件大小为准。
 	track := Track{
 		Ref:          makeRef(ref.ID),
 		Title:        meta.Name,
-		Artists:      meta.artists(),
-		Album:        meta.Album.Name,
+		Artists:      meta.Artists,
+		Album:        meta.AlbumName,
 		DurationMS:   meta.DurationMs,
-		CoverURL:     meta.cover(),
+		CoverURL:     meta.CoverURL,
 		AudioURL:     pluginsdk.MediaRef(sink.Token()),
 		Ext:          "m4a",
-		BitRate:      bitrate / 1000,
+		BitRate:      bitrate,
 		ProviderName: displayName,
+		TagFormat:    "id3",
+		TagPayload:   tagPayload,
 	}
 	return map[string]any{"track": track}, nil
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func metadata(ref Ref) (any, error) {
+	if !client.configured() {
+		return nil, pluginsdk.Fail("auth_required", "未配置 sp_dc")
+	}
+	meta, err := client.getTrack(context.Background(), ref.ID)
+	if err != nil {
+		if err == errNotFound {
+			return nil, pluginsdk.Fail("not_found", "track not found")
+		}
+		return nil, err
+	}
+	return map[string]any{"track": TrackSummary{
+		Ref:        makeRef(ref.ID),
+		Title:      meta.Name,
+		Artists:    meta.Artists,
+		Album:      meta.AlbumName,
+		DurationMS: meta.DurationMs,
+	}}, nil
 }
 
 func searchTracks(_ *pluginsdk.Context, keyword string, limit, offset int) (any, error) {
@@ -71,8 +117,8 @@ func searchTracks(_ *pluginsdk.Context, keyword string, limit, offset int) (any,
 		out = append(out, TrackSummary{
 			Ref:        makeRef(it.ID),
 			Title:      it.Name,
-			Artists:    it.artists(),
-			Album:      it.Album.Name,
+			Artists:    it.Artists,
+			Album:      it.AlbumName,
 			DurationMS: it.DurationMs,
 		})
 	}
@@ -98,7 +144,7 @@ func lyricsFor(_ *pluginsdk.Context, ref Ref) (any, error) {
 	return Lyric{
 		LRC:     lrc,
 		Title:   meta.Name,
-		Artists: meta.artists(),
-		Album:   meta.Album.Name,
+		Artists: meta.Artists,
+		Album:   meta.AlbumName,
 	}, nil
 }

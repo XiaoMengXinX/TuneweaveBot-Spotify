@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,29 +18,58 @@ import (
 )
 
 const (
-	apiBase    = "https://api.spotify.com/v1"
-	lyricsBase = "https://spclient.wg.spotify.com/color-lyrics/v2/track/"
+	pathfinderURL = "https://api-partner.spotify.com/pathfinder/v2/query"
+	lyricsBase    = "https://spclient.wg.spotify.com/color-lyrics/v2/track/"
+
+	getTrackOp     = "getTrack"
+	getTrackHash   = "612585ae06ba435ad26369870deaae23b5c8800a256cd8a57e08eddc25a37294"
+	findTracksOp   = "findTracks"
+	findTracksHash = "755858df4daab8d212980b02a81dcf8c9a58447de318b59d07c4651a1d0450b9"
 )
 
 // apiClient 用 sp_dc cookie 换取的 web-player token 访问 Spotify。
-// 元数据/搜索走公开 Web API，歌词走 color-lyrics，音频走 Widevine（widevine.go）。
+// 元数据/搜索走 Pathfinder GQL，歌词走 color-lyrics，音频走 Widevine（widevine.go）。
 type apiClient struct {
 	http   *http.Client
 	spDC   string
 	market string
 	device *widevine.Device
+	kv     kvStore
 
 	mu          sync.Mutex
 	auth        WebAuth
 	tokenExpiry time.Time
 }
 
-func newAPIClient(hc *http.Client, spDC, market string, device *widevine.Device) *apiClient {
+// kvStore 是宿主 KV，用于在实例间共享 web token。
+type kvStore interface {
+	KVGet(key string) ([]byte, bool, error)
+	KVSet(key string, value []byte) error
+	KVDelete(key string) error
+}
+
+func newAPIClient(hc *http.Client, spDC, market string, device *widevine.Device, kv kvStore) *apiClient {
 	if market == "" {
 		market = "US"
 	}
-	return &apiClient{http: hc, spDC: strings.TrimSpace(spDC), market: market, device: device}
+	return &apiClient{http: hc, spDC: strings.TrimSpace(spDC), market: market, device: device, kv: kv}
 }
+
+const tokenKVKey = "web_token"
+
+// cachedToken 是存进 KV 的 web token。下载在临时实例中进行，不共享就要每首歌重新换一次。
+type cachedToken struct {
+	Auth      WebAuth   `json:"auth"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Owner     string    `json:"owner"` // sp_dc 指纹，换账号后旧 token 作废
+}
+
+func (c *apiClient) tokenOwner() string {
+	sum := sha256.Sum256([]byte(c.spDC))
+	return hex.EncodeToString(sum[:8])
+}
+
+func tokenFresh(expiry time.Time) bool { return time.Now().Before(expiry.Add(-60 * time.Second)) }
 
 func (c *apiClient) configured() bool { return c != nil && c.spDC != "" }
 
@@ -46,8 +77,16 @@ func (c *apiClient) configured() bool { return c != nil && c.spDC != "" }
 func (c *apiClient) webAuth(ctx context.Context) (WebAuth, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.auth.Bearer != "" && time.Now().Before(c.tokenExpiry.Add(-60*time.Second)) {
+	if c.auth.Bearer != "" && tokenFresh(c.tokenExpiry) {
 		return c.auth, nil
+	}
+	if raw, found, err := c.kv.KVGet(tokenKVKey); err == nil && found {
+		var cached cachedToken
+		if json.Unmarshal(raw, &cached) == nil && cached.Owner == c.tokenOwner() &&
+			cached.Auth.Bearer != "" && tokenFresh(cached.ExpiresAt) {
+			c.auth, c.tokenExpiry = cached.Auth, cached.ExpiresAt
+			return c.auth, nil
+		}
 	}
 	wt, err := WebTokenFromCookie(ctx, c.http, c.spDC)
 	if err != nil {
@@ -59,25 +98,35 @@ func (c *apiClient) webAuth(ctx context.Context) (WebAuth, error) {
 	} else {
 		c.tokenExpiry = time.Now().Add(30 * time.Minute)
 	}
+	if raw, err := json.Marshal(cachedToken{Auth: c.auth, ExpiresAt: c.tokenExpiry, Owner: c.tokenOwner()}); err == nil {
+		_ = c.kv.KVSet(tokenKVKey, raw)
+	}
 	return c.auth, nil
 }
 
-// apiGet 用 web-player bearer 访问公开 Web API。
-func (c *apiClient) apiGet(ctx context.Context, path string, query url.Values, out any) error {
+// pathfinderQuery 访问 Pathfinder GQL。web-player token 调用公开 Web API 会被 429。
+func (c *apiClient) pathfinderQuery(ctx context.Context, operation, hash string, variables map[string]any, out any) error {
 	auth, err := c.webAuth(ctx)
 	if err != nil {
 		return err
 	}
-	full := apiBase + path
-	if len(query) > 0 {
-		full += "?" + query.Encode()
+	payload := map[string]any{
+		"variables":     variables,
+		"operationName": operation,
+		"extensions": map[string]any{
+			"persistedQuery": map[string]any{"version": 1, "sha256Hash": hash},
+		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+auth.Bearer)
-	req.Header.Set("Accept", "application/json")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pathfinderURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	ApplyWebAuthHeaders(req, auth)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -89,13 +138,13 @@ func (c *apiClient) apiGet(ctx context.Context, path string, query url.Values, o
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
-	case http.StatusUnauthorized:
-		c.dropToken()
-		return fmt.Errorf("spotify: 未授权（sp_dc 可能失效）")
 	case http.StatusNotFound:
 		return errNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		c.dropToken()
+		return fmt.Errorf("spotify: 未授权（sp_dc 可能失效）")
 	default:
-		return fmt.Errorf("spotify: GET %s 返回 %d", path, resp.StatusCode)
+		return fmt.Errorf("spotify: pathfinder %s 返回 %d", operation, resp.StatusCode)
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -107,53 +156,156 @@ func (c *apiClient) dropToken() {
 	c.mu.Lock()
 	c.auth = WebAuth{}
 	c.mu.Unlock()
+	_ = c.kv.KVDelete(tokenKVKey)
 }
 
 var errNotFound = fmt.Errorf("spotify: 资源不存在")
 
-// apiTrack 是 Web API 的曲目结构，只取我们需要的字段。
+// apiTrack 是曲目的内部统一结构（由 Pathfinder 响应转换而来）。
 type apiTrack struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	DurationMs int    `json:"duration_ms"`
-	Artists    []struct {
-		Name string `json:"name"`
-	} `json:"artists"`
-	Album struct {
-		Name   string `json:"name"`
-		Images []struct {
-			URL string `json:"url"`
-		} `json:"images"`
-	} `json:"album"`
-	ExternalURLs struct {
-		Spotify string `json:"spotify"`
-	} `json:"external_urls"`
+	ID          string
+	Name        string
+	DurationMs  int
+	Artists     []string
+	AlbumName   string
+	CoverURL    string
+	TrackNumber int
+	TrackTotal  int
+	ReleaseDate string
+	Copyright   string
 }
 
-func (t apiTrack) artists() []string {
-	out := make([]string, 0, len(t.Artists))
-	for _, a := range t.Artists {
-		if a.Name != "" {
-			out = append(out, a.Name)
+// pathfinderTrack 对应 Pathfinder trackUnion / 搜索命中的 track 结构，只取所需字段。
+type pathfinderTrack struct {
+	ID       string `json:"id"`
+	URI      string `json:"uri"`
+	Name     string `json:"name"`
+	Duration struct {
+		TotalMilliseconds int `json:"totalMilliseconds"`
+	} `json:"duration"`
+	FirstArtist  struct{ Items []pathfinderArtist } `json:"firstArtist"`
+	OtherArtists struct{ Items []pathfinderArtist } `json:"otherArtists"`
+	Artists      struct{ Items []pathfinderArtist } `json:"artists"`
+	TrackNumber  int                                `json:"trackNumber"`
+	Album        struct {
+		ID   string `json:"id"`
+		URI  string `json:"uri"`
+		Name string `json:"name"`
+		Date struct {
+			IsoString string `json:"isoString"`
+			Precision string `json:"precision"`
+		} `json:"date"`
+		Copyright struct {
+			Items []struct {
+				Text string `json:"text"`
+				Type string `json:"type"`
+			} `json:"items"`
+		} `json:"copyright"`
+		Tracks struct {
+			TotalCount int `json:"totalCount"`
+		} `json:"tracks"`
+		CoverArt struct {
+			Sources []struct {
+				URL    string `json:"url"`
+				Width  int    `json:"width"`
+				Height int    `json:"height"`
+			} `json:"sources"`
+		} `json:"coverArt"`
+	} `json:"albumOfTrack"`
+}
+
+type pathfinderArtist struct {
+	URI     string `json:"uri"`
+	Profile struct {
+		Name string `json:"name"`
+	} `json:"profile"`
+}
+
+// toAPITrack 把 Pathfinder 曲目转为内部结构。封面取最大一张。
+func (p pathfinderTrack) toAPITrack() apiTrack {
+	artists := make([]string, 0, len(p.FirstArtist.Items)+len(p.OtherArtists.Items))
+	src := append(append([]pathfinderArtist{}, p.FirstArtist.Items...), p.OtherArtists.Items...)
+	if len(src) == 0 {
+		src = p.Artists.Items
+	}
+	for _, a := range src {
+		if a.Profile.Name != "" {
+			artists = append(artists, a.Profile.Name)
 		}
 	}
-	return out
+	cover := ""
+	bestArea := -1
+	for _, s := range p.Album.CoverArt.Sources {
+		if area := s.Width * s.Height; area > bestArea {
+			bestArea, cover = area, s.URL
+		}
+	}
+	return apiTrack{
+		ID:         pathfinderID(p.ID, p.URI),
+		Name:       p.Name,
+		DurationMs: p.Duration.TotalMilliseconds,
+		Artists:    artists,
+		AlbumName:  p.Album.Name,
+		CoverURL:   cover,
+
+		TrackNumber: p.TrackNumber,
+		TrackTotal:  p.Album.Tracks.TotalCount,
+		ReleaseDate: releaseDate(p.Album.Date.IsoString, p.Album.Date.Precision),
+		Copyright:   phonogramCopyright(p.Album.Copyright.Items),
+	}
 }
 
-func (t apiTrack) cover() string {
-	if len(t.Album.Images) > 0 {
-		return t.Album.Images[0].URL
+// releaseDate 按精度截取 ISO 时间，得到 YYYY、YYYY-MM 或 YYYY-MM-DD。
+func releaseDate(iso, precision string) string {
+	n := map[string]int{"YEAR": 4, "MONTH": 7}[precision]
+	if n == 0 {
+		n = 10
+	}
+	if len(iso) < n {
+		return ""
+	}
+	return iso[:n]
+}
+
+// phonogramCopyright 取录音版权（P），统一以 ℗ 开头。
+func phonogramCopyright(items []struct {
+	Text string `json:"text"`
+	Type string `json:"type"`
+}) string {
+	for _, it := range items {
+		if it.Type != "P" {
+			continue
+		}
+		text := strings.TrimSpace(strings.Replace(it.Text, "(P)", "℗", 1))
+		if !strings.HasPrefix(text, "℗") {
+			text = "℗ " + text
+		}
+		return text
+	}
+	return ""
+}
+
+// pathfinderID 优先用 id 字段，缺失时从 "spotify:track:<id>" URI 末段取。
+func pathfinderID(id, uri string) string {
+	if id != "" {
+		return id
+	}
+	if i := strings.LastIndex(uri, ":"); i >= 0 {
+		return uri[i+1:]
 	}
 	return ""
 }
 
 func (c *apiClient) getTrack(ctx context.Context, id string) (*apiTrack, error) {
-	q := url.Values{}
-	q.Set("market", c.market)
-	var t apiTrack
-	if err := c.apiGet(ctx, "/tracks/"+url.PathEscape(id), q, &t); err != nil {
+	var resp struct {
+		Data struct {
+			Track pathfinderTrack `json:"trackUnion"`
+		} `json:"data"`
+	}
+	if err := c.pathfinderQuery(ctx, getTrackOp, getTrackHash, map[string]any{"uri": "spotify:track:" + id}, &resp); err != nil {
 		return nil, err
 	}
+	t := resp.Data.Track.toAPITrack()
 	if t.ID == "" {
 		return nil, errNotFound
 	}
@@ -164,28 +316,33 @@ func (c *apiClient) search(ctx context.Context, keyword string, limit, offset in
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	q := url.Values{}
-	q.Set("q", keyword)
-	q.Set("type", "track")
-	q.Set("limit", strconv.Itoa(limit))
-	q.Set("offset", strconv.Itoa(offset))
-	q.Set("market", c.market)
 	var resp struct {
-		Tracks struct {
-			Items []apiTrack `json:"items"`
-			Total int        `json:"total"`
-		} `json:"tracks"`
+		Data struct {
+			SearchV2 struct {
+				TracksV2 struct {
+					Items []struct {
+						Item struct {
+							Data pathfinderTrack `json:"data"`
+						} `json:"item"`
+					} `json:"items"`
+					TotalCount int `json:"totalCount"`
+				} `json:"tracksV2"`
+			} `json:"searchV2"`
+		} `json:"data"`
 	}
-	if err := c.apiGet(ctx, "/search", q, &resp); err != nil {
+	vars := map[string]any{"query": strings.TrimSpace(keyword), "limit": limit, "offset": offset}
+	if err := c.pathfinderQuery(ctx, findTracksOp, findTracksHash, vars, &resp); err != nil {
 		return nil, 0, err
 	}
-	items := make([]apiTrack, 0, len(resp.Tracks.Items))
-	for _, it := range resp.Tracks.Items {
-		if it.ID != "" {
-			items = append(items, it)
+	raw := resp.Data.SearchV2.TracksV2.Items
+	items := make([]apiTrack, 0, len(raw))
+	for _, it := range raw {
+		t := it.Item.Data.toAPITrack()
+		if t.ID != "" {
+			items = append(items, t)
 		}
 	}
-	return items, resp.Tracks.Total, nil
+	return items, resp.Data.SearchV2.TracksV2.TotalCount, nil
 }
 
 // lyrics 取 color-lyrics 歌词，拼成 LRC。无歌词或未同步时返回空串。

@@ -1,5 +1,7 @@
 package main
 
+import "encoding/json"
+
 const (
 	providerName = "spotify"
 	displayName  = "Spotify"
@@ -29,6 +31,8 @@ type Track struct {
 	Size         int64             `json:"size,omitempty"`
 	BitRate      int               `json:"bit_rate,omitempty"`
 	ProviderName string            `json:"provider_name,omitempty"`
+	TagFormat    string            `json:"tag_format,omitempty"`
+	TagPayload   json.RawMessage   `json:"tag_payload,omitempty"`
 	Extra        map[string]string `json:"extra,omitempty"`
 }
 
@@ -61,6 +65,7 @@ type Manifest struct {
 	Commands         []Command     `json:"commands"`
 	Resources        Resources     `json:"resources"`
 	HTTPAllowedHosts []string      `json:"http_allowed_hosts"`
+	LinkHosts        []string      `json:"link_hosts,omitempty"`
 	ConfigSchema     []ConfigField `json:"config_schema,omitempty"`
 }
 

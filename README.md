@@ -4,17 +4,18 @@
 歌词走 color-lyrics，音频走 Widevine（track-playback → storage-resolve → 本地构造
 PSSH → license → CENC 解密），解密后的 AAC/MP4 经宿主的 `media` 能力落盘上传。
 
-这是**数据面重**的插件：解密在插件内完成，整轨经 `media.*` 流式交给宿主，详见
+这是**数据面重**的插件：密文由宿主下载到 `/scratch`，插件按分片流式解密，内存占用
+与音轨时长无关，明文经 `media.*` 流式交给宿主，详见
 [plugins/README.md §9](../README.md)。
 
 ## 构建
 
 ```sh
+bash build-plugins.sh                  # 默认构建 netease 与 spotify
 PLUGINS="spotify" bash build-plugins.sh
 ```
 
-然后在 `config.toml` 的 `[plugins] enabled` 里加上 `spotify`。默认 `build-plugins.sh`
-只构建 netease，Spotify 需显式指定。
+`[plugins] enabled` 非空时需在其中加上 `spotify`。
 
 ## 配置
 
@@ -26,6 +27,7 @@ fs_dir = "./plugin-fs"   # 只读挂进沙箱的目录，wvd_path 相对它解�
 sp_dc = ""               # open.spotify.com Cookie 里的 sp_dc；留空可用 /login spotify token 提交
 wvd_path = "spotify.wvd" # Widevine L3 设备文件，相对 [plugins] fs_dir
 market = "US"            # 元数据/搜索地区代码
+instances = 2            # 常驻实例数（搜索/匹配），上限 4；下载并发由 [download] concurrency 控制
 ```
 
 ### sp_dc
@@ -43,16 +45,22 @@ wazero 沙箱里，宿主实例化时只把 `[plugins] fs_dir` 这个目录**只
 取得 `.wvd`：在一台实体 Android 设备（建议 13/14+）上用 KeyDive 之类工具提取。
 把文件放进 `fs_dir`，`wvd_path` 填相对名即可。
 
-### 内置设备（builtin.wvd）
+### 内置设备
 
-`builtin.wvd` 是一份内置的公开 L3 设备，**开箱即用**：不配 `wvd_path` 时自动使用它。
+`device_embed.go` 中的 `builtinWVD` 是一份内置的公开 L3 设备，**开箱即用**：不配 `wvd_path` 时自动使用它。
 但：
 
 - 公开 L3 设备随时可能被 Google/Spotify 吊销，届时音频下载开始失败；
 - 它是和别人共享的公开设备，稳定性和速率都没保证。
 
 需要稳定使用时优先自备 `.wvd` + `wvd_path`，内置设备只作开箱即用的回落。把
-`builtin.wvd` 清空再重新构建即可禁用内置回落（此时必须配 `wvd_path`）。
+`builtinWVD` 置空再重新构建即可禁用内置回落（此时必须配 `wvd_path`）。
+
+## 标签
+
+宿主为 m4a 写入 iTunes 标签与封面：标题、艺人、专辑、专辑艺人、发行日期、曲目号/总数、
+碟号、作曲、版权（℗），以及 `ISRC`/`UPC`/`EAN`/`label` 自定义字段。专辑艺人、厂牌、
+ISRC 等来自 spclient `metadata/4/track`，作曲来自 credits，这两项获取失败时只缺对应字段。
 
 ## 质量
 
