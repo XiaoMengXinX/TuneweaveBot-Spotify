@@ -13,12 +13,20 @@ PSSH → license → CENC 解密），解密后的 AAC/MP4 经宿主的 `media` 
 ## 构建
 
 ```sh
-CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
-  go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o spotify.wasm .
+bash build-plugins.sh   # 输出 dist/plugins/spotify.wasm 与 version.json
 ```
 
-把 `spotify.wasm` 放进 TuneweaveBot 的插件目录（`[plugins] dir`，默认 `./plugins`）。
-`[plugins] enabled` 非空时需在其中加上 `spotify`。
+构建时把 commit 与构建时间注入插件 manifest（显示在 `/status`），`version.json` 记录版本、
+构建时间和 commit。把 `spotify.wasm` 放进 TuneweaveBot 的插件目录（`[plugins] dir`，默认
+`./plugins`）；`[plugins] enabled` 非空时需在其中加上 `spotify`。
+
+## 发布
+
+推送到 master 后 GitHub Actions 自动测试、构建，并更新固定的
+[plugin](https://github.com/XiaoMengXinX/TuneweaveBot-Spotify/releases/tag/plugin) release：
+
+- `spotify.wasm`：https://github.com/XiaoMengXinX/TuneweaveBot-Spotify/releases/download/plugin/spotify.wasm
+- `version.json`：`{"version": "...", "build_time": "...", "commit": "..."}`
 
 ## 配置
 

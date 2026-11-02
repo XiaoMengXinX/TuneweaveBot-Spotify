@@ -1,0 +1,48 @@
+name: Plugin
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "**.go"
+      - go.mod
+      - go.sum
+      - build-plugins.sh
+      - .github/workflows/plugin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin-release
+
+env:
+  RELEASE: plugin
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: GOOS=wasip1 GOARCH=wasm go vet ./... && go test ./...
+      - name: Build
+        run: bash build-plugins.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f "$RELEASE"
+          git push -f origin "refs/tags/$RELEASE"
+          notes=$(jq -r '"版本: \(.version)\n构建时间: \(.build_time)\nCommit: \(.commit)"' dist/plugins/version.json)
+          gh release view "$RELEASE" >/dev/null 2>&1 || gh release create "$RELEASE" --title "$RELEASE" --notes "" --latest=false --verify-tag
+          gh release edit "$RELEASE" --title "$RELEASE" --notes "$notes" --latest=false
+          gh release upload "$RELEASE" dist/plugins/*.wasm dist/plugins/version.json --clobber

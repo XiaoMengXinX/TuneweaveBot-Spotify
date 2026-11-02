@@ -58,6 +58,8 @@ type Manifest struct {
 	Name             string        `json:"name"`
 	DisplayName      string        `json:"display_name"`
 	Version          string        `json:"version"`
+	Commit           string        `json:"commit,omitempty"`
+	BuildTime        string        `json:"build_time,omitempty"`
 	ABI              int           `json:"abi"`
 	Code             string        `json:"code"`
 	Capabilities     []string      `json:"capabilities"`
