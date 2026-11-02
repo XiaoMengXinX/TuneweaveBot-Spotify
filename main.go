@@ -2,7 +2,8 @@
 //
 // 元数据/搜索/歌词走 sp_dc cookie 换取的 web-player token；音频走 Widevine：
 // track-playback → storage-resolve → 本地构造 PSSH → license → CENC 解密，
-// 解密后的 AAC/MP4 经 media.* 能力交给宿主上传。需要 operator 提供 .wvd 设备。
+// 解密后的 AAC/MP4 经 media.* 能力交给宿主上传。内置公开 L3 设备可开箱即用，
+// 也可用 wvd_path 覆盖为自备 .wvd。
 package main
 
 import (
