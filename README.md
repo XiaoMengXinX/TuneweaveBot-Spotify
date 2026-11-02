@@ -13,20 +13,24 @@ PSSH → license → CENC 解密），解密后的 AAC/MP4 经宿主的 `media` 
 ## 构建
 
 ```sh
-bash build-plugins.sh   # 输出 dist/plugins/spotify.wasm 与 version.json
+bash build-plugins.sh   # 输出 dist/plugins/spotify.wasm.gz 与 version.json
 ```
 
 构建时把 commit 与构建时间注入插件 manifest（显示在 `/status`），`version.json` 记录版本、
-构建时间和 commit。把 `spotify.wasm` 放进 TuneweaveBot 的插件目录（`[plugins] dir`，默认
-`./plugins`）；`[plugins] enabled` 非空时需在其中加上 `spotify`。
+构建时间、commit 和 sha256。产物经 gzip 压缩，TuneweaveBot 直接加载，把 `spotify.wasm.gz`
+放进插件目录（`[plugins] dir`，默认 `./plugins`）即可；`[plugins] enabled` 非空时需在其中
+加上 `spotify`。
 
 ## 发布
 
 推送到 master 后 GitHub Actions 自动测试、构建，并更新固定的
 [plugin](https://github.com/XiaoMengXinX/TuneweaveBot-Spotify/releases/tag/plugin) release：
 
-- `spotify.wasm`：https://github.com/XiaoMengXinX/TuneweaveBot-Spotify/releases/download/plugin/spotify.wasm
-- `version.json`：`{"version": "...", "build_time": "...", "commit": "..."}`
+- `spotify.wasm.gz`：https://github.com/XiaoMengXinX/TuneweaveBot-Spotify/releases/download/plugin/spotify.wasm.gz
+- `version.json`：`{"version": "...", "build_time": "...", "commit": "...", "sha256": "..."}`
+
+发布构建会把这两个地址写入插件 manifest，TuneweaveBot 据此自动检查更新，管理员可一键更新；
+本地构建不带更新地址，不参与自动更新。
 
 ## 配置
 

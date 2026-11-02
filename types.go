@@ -60,6 +60,8 @@ type Manifest struct {
 	Version          string        `json:"version"`
 	Commit           string        `json:"commit,omitempty"`
 	BuildTime        string        `json:"build_time,omitempty"`
+	UpdateURL        string        `json:"update_url,omitempty"`
+	VersionURL       string        `json:"version_url,omitempty"`
 	ABI              int           `json:"abi"`
 	Code             string        `json:"code"`
 	Capabilities     []string      `json:"capabilities"`

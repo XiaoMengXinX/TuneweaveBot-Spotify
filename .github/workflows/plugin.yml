@@ -35,6 +35,8 @@ jobs:
       - name: Test
         run: GOOS=wasip1 GOARCH=wasm go vet ./... && go test ./...
       - name: Build
+        env:
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/plugin
         run: bash build-plugins.sh
       - name: Publish
         env:
@@ -45,4 +47,4 @@ jobs:
           notes=$(jq -r '"版本: \(.version)\n构建时间: \(.build_time)\nCommit: \(.commit)"' dist/plugins/version.json)
           gh release view "$RELEASE" >/dev/null 2>&1 || gh release create "$RELEASE" --title "$RELEASE" --notes "" --latest=false --verify-tag
           gh release edit "$RELEASE" --title "$RELEASE" --notes "$notes" --latest=false
-          gh release upload "$RELEASE" dist/plugins/*.wasm dist/plugins/version.json --clobber
+          gh release upload "$RELEASE" dist/plugins/*.wasm.gz dist/plugins/version.json --clobber
