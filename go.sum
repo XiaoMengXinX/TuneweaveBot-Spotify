@@ -1,5 +1,7 @@
 github.com/Eyevinn/mp4ff v0.61.0 h1:uX3GBauEouxuGepRbv15JB7X2RyVyE2EZEfLpgimL6o=
 github.com/Eyevinn/mp4ff v0.61.0/go.mod h1:97zsDIJUiDTYqKpqq/b1K9foamxXmvsgE4GdPrPK3ks=
+github.com/XiaoMengXinX/TuneweaveBot/pluginsdk v0.0.0-20261102171200-f3a497406b17 h1:KD472+Xj8bZSDGhBEqWVCEfu9ZwQd+yS2B0fA9gsjIA=
+github.com/XiaoMengXinX/TuneweaveBot/pluginsdk v0.0.0-20261102171200-f3a497406b17/go.mod h1:cNcEq7IDA/wjcJjY76tuhNNml7SX6qIfFzAqfcNL/Lg=
 github.com/chmike/cmac-go v1.1.0 h1:aF73ZAEx9N2WdQc93DOJ2fMsBDAGqUtuenjMJMb3kEI=
 github.com/chmike/cmac-go v1.1.0/go.mod h1:wcIN7NRqWSKGuORzd4dReBkoBDE9ZBqfyTVxyDxGeUw=
 github.com/go-test/deep v1.1.0 h1:WOcxcdHcvdgThNXjw0t76K42FXTU7HpNQWHpA2HHNlg=

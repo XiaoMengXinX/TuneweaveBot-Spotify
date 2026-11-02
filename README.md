@@ -1,20 +1,23 @@
-# Spotify 插件
+# TuneweaveBot-Spotify
+
+[TuneweaveBot](https://github.com/XiaoMengXinX/TuneweaveBot) 的 Spotify 插件。
 
 用 `sp_dc` cookie 换取 web-player token 访问 Spotify：元数据/搜索走公开 Web API，
 歌词走 color-lyrics，音频走 Widevine（track-playback → storage-resolve → 本地构造
 PSSH → license → CENC 解密），解密后的 AAC/MP4 经宿主的 `media` 能力落盘上传。
 
 这是**数据面重**的插件：密文由宿主下载到 `/scratch`，插件按分片流式解密，内存占用
-与音轨时长无关，明文经 `media.*` 流式交给宿主，详见
-[plugins/README.md §9](../README.md)。
+与音轨时长无关，明文经 `media.*` 流式交给宿主，详见插件开发文档
+[plugins/README.md §9](https://github.com/XiaoMengXinX/TuneweaveBot/blob/master/plugins/README.md)。
 
 ## 构建
 
 ```sh
-bash build-plugins.sh                  # 默认构建 netease 与 spotify
-PLUGINS="spotify" bash build-plugins.sh
+CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm \
+  go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o spotify.wasm .
 ```
 
+把 `spotify.wasm` 放进 TuneweaveBot 的插件目录（`[plugins] dir`，默认 `./plugins`）。
 `[plugins] enabled` 非空时需在其中加上 `spotify`。
 
 ## 配置
