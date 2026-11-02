@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,8 @@ type apiClient struct {
 	mu          sync.Mutex
 	auth        WebAuth
 	tokenExpiry time.Time
+
+	log func(level, message string) // 当前调用的宿主日志，由 handle 设置
 }
 
 // kvStore 是宿主 KV，用于在实例间共享 web token。
@@ -56,6 +59,9 @@ func newAPIClient(hc *http.Client, spDC, market string, device *widevine.Device,
 }
 
 const tokenKVKey = "web_token"
+
+// mintWebToken 用 sp_dc 换取新的 web-player token，测试中可替换。
+var mintWebToken = WebTokenFromCookie
 
 // cachedToken 是存进 KV 的 web token。下载在临时实例中进行，不共享就要每首歌重新换一次。
 type cachedToken struct {
@@ -85,12 +91,19 @@ func (c *apiClient) webAuth(ctx context.Context) (WebAuth, error) {
 		if json.Unmarshal(raw, &cached) == nil && cached.Owner == c.tokenOwner() &&
 			cached.Auth.Bearer != "" && tokenFresh(cached.ExpiresAt) {
 			c.auth, c.tokenExpiry = cached.Auth, cached.ExpiresAt
+			c.logf("debug", "spotify: 使用 KV 中缓存的 web token，剩余 %s", time.Until(cached.ExpiresAt).Round(time.Second))
 			return c.auth, nil
 		}
 	}
-	wt, err := WebTokenFromCookie(ctx, c.http, c.spDC)
+	wt, err := mintWebToken(ctx, c.http, c.spDC)
+	if wt != nil {
+		c.logf("debug", "spotify: 换取 web token: %s", strings.Join(wt.Steps, "；"))
+	}
 	if err != nil {
 		return WebAuth{}, err
+	}
+	if wt.TOTPWarning != "" {
+		c.logf("warn", "spotify: %s", wt.TOTPWarning)
 	}
 	c.auth = WebAuth{Bearer: wt.AccessToken, ClientToken: wt.ClientToken}
 	if wt.ExpiresAtMs > 0 {
@@ -104,12 +117,59 @@ func (c *apiClient) webAuth(ctx context.Context) (WebAuth, error) {
 	return c.auth, nil
 }
 
-// pathfinderQuery 访问 Pathfinder GQL。web-player token 调用公开 Web API 会被 429。
-func (c *apiClient) pathfinderQuery(ctx context.Context, operation, hash string, variables map[string]any, out any) error {
+var (
+	// errSpDCInvalid 表示 /api/token 判定 sp_dc 无效（TOTP 正确时返回 401，或只给匿名 token）。
+	// 这是判定未登录的唯一依据，其余失败（网络、TOTP 密钥错误、业务接口报错等）都与登录状态无关。
+	errSpDCInvalid = errors.New("sp_dc 已失效")
+	// errTokenRejected 标记请求可能因 token 失效被拒，withToken 据此换新 token 重试一次。
+	errTokenRejected = errors.New("token 被拒")
+)
+
+// tokenRejected 判断状态码是否可能由 token 失效引起（400/401）。
+func tokenRejected(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnauthorized
+}
+
+func rejectedErr(what string, status int, body []byte) error {
+	return fmt.Errorf("%s HTTP %d: %s: %w", what, status, snippet(body), errTokenRejected)
+}
+
+// withToken 用当前 web-player token 执行 do；token 被拒时丢弃缓存、换新 token 重试一次。
+// 新 token 有效且非匿名时说明 sp_dc 正常，此时仍失败按普通错误返回，不影响登录状态。
+func (c *apiClient) withToken(ctx context.Context, do func(WebAuth) error) error {
 	auth, err := c.webAuth(ctx)
 	if err != nil {
 		return err
 	}
+	if err = do(auth); !errors.Is(err, errTokenRejected) {
+		return err
+	}
+	c.logf("warn", "spotify: %v，换新 token 后重试", err)
+	c.dropToken()
+	if auth, err = c.webAuth(ctx); err != nil {
+		return err
+	}
+	if err = do(auth); errors.Is(err, errTokenRejected) {
+		c.logf("error", "spotify: 已换到有效的非匿名 token（sp_dc 正常），请求仍失败: %v", err)
+		return fmt.Errorf("spotify: %s（已换新 token 重试，sp_dc 正常）", strings.TrimSuffix(err.Error(), ": "+errTokenRejected.Error()))
+	}
+	return err
+}
+
+func (c *apiClient) logf(level, format string, args ...any) {
+	if c.log != nil {
+		c.log(level, fmt.Sprintf(format, args...))
+	}
+}
+
+// pathfinderQuery 访问 Pathfinder GQL。web-player token 调用公开 Web API 会被 429。
+func (c *apiClient) pathfinderQuery(ctx context.Context, operation, hash string, variables map[string]any, out any) error {
+	return c.withToken(ctx, func(auth WebAuth) error {
+		return c.pathfinderOnce(ctx, auth, operation, hash, variables, out)
+	})
+}
+
+func (c *apiClient) pathfinderOnce(ctx context.Context, auth WebAuth, operation, hash string, variables map[string]any, out any) error {
 	payload := map[string]any{
 		"variables":     variables,
 		"operationName": operation,
@@ -140,9 +200,8 @@ func (c *apiClient) pathfinderQuery(ctx context.Context, operation, hash string,
 	case http.StatusOK:
 	case http.StatusNotFound:
 		return errNotFound
-	case http.StatusUnauthorized, http.StatusForbidden:
-		c.dropToken()
-		return fmt.Errorf("spotify: 未授权（sp_dc 可能失效）")
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		return rejectedErr("pathfinder "+operation, resp.StatusCode, data)
 	default:
 		return fmt.Errorf("spotify: pathfinder %s 返回 %d", operation, resp.StatusCode)
 	}
@@ -346,11 +405,15 @@ func (c *apiClient) search(ctx context.Context, keyword string, limit, offset in
 }
 
 // lyrics 取 color-lyrics 歌词，拼成 LRC。无歌词或未同步时返回空串。
-func (c *apiClient) lyrics(ctx context.Context, id string) (string, error) {
-	auth, err := c.webAuth(ctx)
-	if err != nil {
-		return "", err
-	}
+func (c *apiClient) lyrics(ctx context.Context, id string) (lrc string, err error) {
+	err = c.withToken(ctx, func(auth WebAuth) error {
+		lrc, err = c.lyricsOnce(ctx, auth, id)
+		return err
+	})
+	return lrc, err
+}
+
+func (c *apiClient) lyricsOnce(ctx context.Context, auth WebAuth, id string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lyricsBase+url.PathEscape(id)+"?format=json&market="+c.market, nil)
 	if err != nil {
 		return "", err
@@ -364,8 +427,10 @@ func (c *apiClient) lyrics(ctx context.Context, id string) (string, error) {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	switch resp.StatusCode {
 	case http.StatusOK:
-	case http.StatusForbidden, http.StatusNotFound:
+	case http.StatusForbidden, http.StatusNotFound: // 无歌词
 		return "", nil
+	case http.StatusBadRequest, http.StatusUnauthorized:
+		return "", rejectedErr("lyrics", resp.StatusCode, data)
 	default:
 		return "", fmt.Errorf("spotify: lyrics 返回 %d", resp.StatusCode)
 	}

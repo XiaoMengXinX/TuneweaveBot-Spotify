@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -40,22 +41,25 @@ func deriveSecret(cipher []int) []byte {
 	return []byte(sb.String())
 }
 
-// fetchTOTPSecret returns the highest-versioned TOTP cipher from the public
-// dictionary, falling back to the built-in version on any failure.
-func fetchTOTPSecret(ctx context.Context, hc *http.Client) (version string, cipher []int) {
+// fetchTOTPSecret 返回在线密钥字典中版本最高的 TOTP 密钥；拉取失败时回落内置密钥。
+// source 说明密钥来源，回落时附带原因，供日志诊断。
+func fetchTOTPSecret(ctx context.Context, hc *http.Client) (version string, cipher []int, source string) {
+	builtin := func(reason string) (string, []int, string) {
+		return builtinTOTPSecretVer, builtinTOTPCipher, "内置（" + reason + "）"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, totpSecretDictURL, nil)
 	if err != nil {
-		return builtinTOTPSecretVer, builtinTOTPCipher
+		return builtin(err.Error())
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return builtinTOTPSecretVer, builtinTOTPCipher
+		return builtin("拉取 git.gay 失败: " + err.Error())
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var dict map[string][]int
 	if json.Unmarshal(b, &dict) != nil || len(dict) == 0 {
-		return builtinTOTPSecretVer, builtinTOTPCipher
+		return builtin(fmt.Sprintf("git.gay 返回 HTTP %d，内容无法解析", resp.StatusCode))
 	}
 	bestVer, bestNum := "", -1
 	for k := range dict {
@@ -65,9 +69,9 @@ func fetchTOTPSecret(ctx context.Context, hc *http.Client) (version string, ciph
 	}
 	arr := dict[bestVer]
 	if len(arr) == 0 {
-		return builtinTOTPSecretVer, builtinTOTPCipher
+		return builtin("git.gay 字典中没有可用版本")
 	}
-	return bestVer, arr
+	return bestVer, arr, "git.gay"
 }
 
 // generateTOTP computes the 6-digit HMAC-SHA1 TOTP Spotify expects, using the
@@ -91,6 +95,7 @@ type WebTokenResult struct {
 	ClientToken string
 	ExpiresAtMs int64
 	Steps       []string
+	TOTPWarning string // /api/token 成功但提示 TOTP 版本过期时的说明
 }
 
 // WebTokenFromCookie exchanges an sp_dc cookie for a web-player access token.
@@ -105,7 +110,7 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	res := &WebTokenResult{}
 	add := func(f string, a ...any) { res.Steps = append(res.Steps, fmt.Sprintf(f, a...)) }
 
-	add("sp_dc 收到: 长度=%d (完整的通常 200~270 字符)", len(spDC))
+	add("sp_dc 长度 %d", len(spDC))
 
 	// 1) server time (cookie-authenticated)
 	stReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.spotify.com/api/server-time", nil)
@@ -122,12 +127,12 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	if json.Unmarshal(stBody, &stj) != nil || stj.ServerTime == 0 {
 		return res, fmt.Errorf("server-time parse failed (HTTP %d): %s", stResp.StatusCode, snippet(stBody))
 	}
-	add("server-time ok: %d", stj.ServerTime)
+	add("server-time %d", stj.ServerTime)
 
 	// 2) TOTP (derive the real HMAC key from the obfuscated cipher first)
-	ver, cipher := fetchTOTPSecret(ctx, hc)
+	ver, cipher, source := fetchTOTPSecret(ctx, hc)
 	totp := generateTOTP(deriveSecret(cipher), stj.ServerTime*1000)
-	add("totp version %s computed", ver)
+	add("TOTP 密钥 v%s，来源 %s", ver, source)
 
 	// 3) /api/token (cookie + TOTP)
 	tokURL := fmt.Sprintf("https://open.spotify.com/api/token?reason=init&productType=web-player&totp=%s&totpServer=%s&totpVer=%s", totp, totp, ver)
@@ -135,26 +140,42 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	cookieHeaders(tReq, spDC)
 	tResp, err := hc.Do(tReq)
 	if err != nil {
+		// 未拿到 /api/token 的响应（超时、DNS 等）属于网络问题，不判定 sp_dc 失效
 		return res, fmt.Errorf("token: %w", err)
 	}
 	tBody, _ := io.ReadAll(io.LimitReader(tResp.Body, 1<<16))
 	tResp.Body.Close()
-	if tResp.StatusCode != 200 {
-		return res, fmt.Errorf("token HTTP %d: %s", tResp.StatusCode, snippet(tBody))
+	add("/api/token HTTP %d", tResp.StatusCode)
+	// TOTP 先于 sp_dc 校验：400 说明 TOTP 密钥错误，无法据此判断 sp_dc；
+	// 401 说明 TOTP 正确而 sp_dc 无效。
+	switch tResp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return res, fmt.Errorf("%w: /api/token HTTP 401: %s", errSpDCInvalid, snippet(tBody))
+	case http.StatusBadRequest:
+		return res, fmt.Errorf("/api/token 拒绝 TOTP（密钥 v%s，来源 %s），密钥可能已轮换: %s", ver, source, snippet(tBody))
+	default:
+		return res, fmt.Errorf("/api/token HTTP %d: %s", tResp.StatusCode, snippet(tBody))
 	}
 	var tj struct {
 		AccessToken                      string `json:"accessToken"`
 		ClientID                         string `json:"clientId"`
 		IsAnonymous                      bool   `json:"isAnonymous"`
 		AccessTokenExpirationTimestampMs int64  `json:"accessTokenExpirationTimestampMs"`
+		TOTPVerExpired                   string `json:"totpVerExpired"`
+		TOTPValidUntil                   string `json:"totpValidUntil"`
 	}
 	if json.Unmarshal(tBody, &tj) != nil || tj.AccessToken == "" {
-		return res, fmt.Errorf("token parse failed: %s", snippet(tBody))
+		return res, fmt.Errorf("/api/token 响应无法解析: %s", snippet(tBody))
 	}
 	if tj.IsAnonymous {
-		return res, fmt.Errorf("got anonymous token — sp_dc invalid or expired")
+		return res, fmt.Errorf("%w: /api/token 返回匿名 token", errSpDCInvalid)
 	}
-	add("web token ok (len=%d, anonymous=%v)", len(tj.AccessToken), tj.IsAnonymous)
+	if tj.TOTPVerExpired != "" {
+		res.TOTPWarning = fmt.Sprintf("TOTP 密钥 v%s（来源 %s）已过期（totpVerExpired=%s，有效期至 %s），需更新密钥", ver, source, tj.TOTPVerExpired, tj.TOTPValidUntil)
+		add("%s", res.TOTPWarning)
+	}
+	add("web token 有效（长度 %d，到期 %s）", len(tj.AccessToken), time.UnixMilli(tj.AccessTokenExpirationTimestampMs).UTC().Format(time.RFC3339))
 	res.AccessToken = tj.AccessToken
 	res.ClientID = tj.ClientID
 	res.ExpiresAtMs = tj.AccessTokenExpirationTimestampMs
@@ -164,9 +185,9 @@ func WebTokenFromCookie(ctx context.Context, hc *http.Client, spDC string) (*Web
 	if tj.ClientID != "" {
 		if ct, cterr := fetchWebClientToken(ctx, hc, tj.ClientID); cterr == nil {
 			res.ClientToken = ct
-			add("client-token ok (len=%d)", len(ct))
+			add("client-token 有效（长度 %d）", len(ct))
 		} else {
-			add("client-token fetch failed (continuing without): %v", cterr)
+			add("client-token 获取失败（继续使用 web token）: %v", cterr)
 		}
 	}
 	return res, nil

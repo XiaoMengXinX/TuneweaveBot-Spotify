@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"github.com/XiaoMengXinX/TuneweaveBot/pluginsdk"
 )
@@ -10,11 +11,16 @@ func authStatus(_ *pluginsdk.Context) (any, error) {
 	if !client.configured() {
 		return AuthStatus{Authenticated: false}, nil
 	}
-	// 能换到非匿名 token 即视为已登录。
-	if _, err := client.webAuth(context.Background()); err != nil {
+	// 只有换到匿名 token 才算未登录；网络等错误交给宿主跳过本轮检查。
+	_, err := client.webAuth(context.Background())
+	switch {
+	case err == nil:
+		return AuthStatus{Authenticated: true}, nil
+	case errors.Is(err, errSpDCInvalid):
 		return AuthStatus{Authenticated: false}, nil
+	default:
+		return nil, err
 	}
-	return AuthStatus{Authenticated: true}, nil
 }
 
 // authBegin 只支持 token 登录：提示用户回复 sp_dc cookie（忽略 mode）。
@@ -34,7 +40,10 @@ func authSubmit(_ *pluginsdk.Context, token string) (any, error) {
 	if _, err := client.webAuth(context.Background()); err != nil {
 		client.spDC = prev
 		client.dropToken()
-		return AuthState{State: "expired"}, nil
+		if errors.Is(err, errSpDCInvalid) {
+			return AuthState{State: "expired"}, nil
+		}
+		return nil, err
 	}
 	return AuthState{
 		State:      "success",

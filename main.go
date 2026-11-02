@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 
 	widevine "github.com/iyear/gowidevine"
 
@@ -74,6 +75,18 @@ func manifest() Manifest {
 }
 
 func handle(c *pluginsdk.Context) (any, error) {
+	if client != nil {
+		client.log = c.Log
+	}
+	out, err := dispatch(c)
+	// 只有 sp_dc 失效才报未登录，宿主据此暂停下载并提醒；其余失败按普通错误上报
+	if errors.Is(err, errSpDCInvalid) {
+		return nil, pluginsdk.Fail("auth_required", err.Error())
+	}
+	return out, err
+}
+
+func dispatch(c *pluginsdk.Context) (any, error) {
 	switch c.Action() {
 	case "manifest":
 		return manifest(), nil

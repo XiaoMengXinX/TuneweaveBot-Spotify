@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 
 	"github.com/XiaoMengXinX/TuneweaveBot/pluginsdk"
@@ -31,16 +32,19 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	auth, err := client.webAuth(ctx)
-	if err != nil {
-		_ = sink.Abort()
-		return nil, err
-	}
 	opts := &pluginsdk.DownloadOptions{Title: meta.Name, Album: meta.AlbumName}
 	out := &countingWriter{w: sink}
-	bitrate, derr := DownloadAndDecrypt(ctx, c, client.http, auth, client.device, ref.ID, qualityBitrate, opts, out)
+	// token 被拒只会发生在 license 之前，此时尚未写入 sink，可以安全重试
+	var bitrate int
+	derr := client.withToken(ctx, func(auth WebAuth) (err error) {
+		bitrate, err = DownloadAndDecrypt(ctx, c, client.http, auth, client.device, ref.ID, qualityBitrate, opts, out)
+		return err
+	})
 	if derr != nil {
 		_ = sink.Abort()
+		if errors.Is(derr, errSpDCInvalid) {
+			return nil, derr
+		}
 		return nil, pluginsdk.Fail("internal", derr.Error())
 	}
 	if err := sink.Close(); err != nil {
@@ -50,6 +54,8 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 	if meta.DurationMs > 0 {
 		bitrate = int(out.n * 8 * 1000 / int64(meta.DurationMs))
 	}
+	// 标签补充信息尽力获取，token 不可用时只缺对应字段
+	auth, _ := client.webAuth(ctx)
 	tagPayload, err := json.Marshal(buildTags(ctx, auth, meta))
 	if err != nil {
 		return nil, err

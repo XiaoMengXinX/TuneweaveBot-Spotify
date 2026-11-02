@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/Eyevinn/mp4ff/mp4"
 	widevine "github.com/iyear/gowidevine"
@@ -102,6 +103,9 @@ func resolveMP4Files(ctx context.Context, hc *http.Client, auth WebAuth, trackID
 	if err != nil {
 		return nil, fmt.Errorf("track-playback request: %w", err)
 	}
+	if tokenRejected(status) {
+		return nil, rejectedErr("track-playback", status, raw)
+	}
 	if status != 200 {
 		return nil, fmt.Errorf("track-playback HTTP %d: %s", status, snippet(raw))
 	}
@@ -172,6 +176,9 @@ func storageResolveMP4(ctx context.Context, hc *http.Client, auth WebAuth, fileI
 	raw, status, err := getRawAuth(ctx, hc, srURL, auth)
 	if err != nil {
 		return "", fmt.Errorf("storage-resolve request: %w", err)
+	}
+	if tokenRejected(status) {
+		return "", rejectedErr("storage-resolve", status, raw)
 	}
 	if status != 200 {
 		return "", fmt.Errorf("storage-resolve[%s] HTTP %d: %s", format, status, snippet(raw))
@@ -272,6 +279,9 @@ func acquireContentKey(ctx context.Context, hc *http.Client, auth WebAuth, devic
 	body, status, hdr, err := postLicense(ctx, hc, auth, challenge)
 	if err != nil {
 		return nil, fmt.Errorf("license post: %w", err)
+	}
+	if tokenRejected(status) {
+		return nil, rejectedErr("license", status, body)
 	}
 	if status != 200 {
 		diag := fmt.Sprintf("HTTP %d", status)
@@ -429,6 +439,14 @@ func decryptMP4Stream(r io.Reader, keys []*widevine.Key, w io.Writer) error {
 	return nil
 }
 
+func describeFiles(files []wvFile) string {
+	parts := make([]string, 0, len(files))
+	for _, f := range files {
+		parts = append(parts, fmt.Sprintf("%dk(format %s)", f.Bitrate/1000, f.Format))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // DownloadAndDecrypt 把解密后的 MP4(AAC) 写入 dst，返回实际码率（bps）。
 // preferredBitrate 单位 kbps，0 表示最高；失败时依次尝试更低码率。
 func DownloadAndDecrypt(ctx context.Context, c *pluginsdk.Context, hc *http.Client, auth WebAuth, device *widevine.Device, trackID string, preferredBitrate int, opts *pluginsdk.DownloadOptions, dst io.Writer) (bitrate int, err error) {
@@ -438,7 +456,14 @@ func DownloadAndDecrypt(ctx context.Context, c *pluginsdk.Context, hc *http.Clie
 	}
 
 	candidates := selectMP4Candidates(files, preferredBitrate)
+	c.Log("debug", fmt.Sprintf("spotify: %s 可用 MP4 %d 个，按顺序尝试 %s", trackID, len(files), describeFiles(candidates)))
 	var attemptErrs []error
+	defer func() {
+		// 回落到较低码率时记录前面失败的原因
+		if err == nil && len(attemptErrs) > 0 {
+			c.Log("debug", fmt.Sprintf("spotify: %s 使用 %dk，跳过的码率: %v", trackID, bitrate/1000, errors.Join(attemptErrs...)))
+		}
+	}()
 	for _, file := range candidates {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
