@@ -402,7 +402,9 @@ func downloadAndDecryptMP4(ctx context.Context, hc *http.Client, cdnURL string, 
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind output scratch file: %w", err)
 	}
-	if _, err := io.Copy(dst, out); err != nil {
+	// 大块拷贝：dst 是 media sink，每次 Write 都是一次 base64 host-call，
+	// 用 512KB 缓冲把单轨的 host-call 次数从数百降到十几次。
+	if _, err := io.CopyBuffer(dst, out, make([]byte, 512<<10)); err != nil {
 		return fmt.Errorf("write decrypted output: %w", err)
 	}
 	return nil

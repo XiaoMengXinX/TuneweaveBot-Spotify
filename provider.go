@@ -13,6 +13,9 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 	if !client.configured() {
 		return nil, pluginsdk.Fail("auth_required", "未配置 sp_dc，请用 /login spotify token 登录")
 	}
+	if client.device == nil {
+		return nil, pluginsdk.Fail("internal", "未配置 Widevine 设备(.wvd)，无法下载音频")
+	}
 	ctx := context.Background()
 	meta, err := client.getTrack(ctx, ref.ID)
 	if err != nil {
@@ -20,10 +23,6 @@ func resolve(c *pluginsdk.Context, ref Ref) (any, error) {
 			return nil, pluginsdk.Fail("not_found", "track not found")
 		}
 		return nil, err
-	}
-
-	if client.device == nil {
-		return nil, pluginsdk.Fail("internal", "未配置 Widevine 设备(.wvd)，无法下载音频")
 	}
 
 	sink, err := c.OpenMedia("m4a")
