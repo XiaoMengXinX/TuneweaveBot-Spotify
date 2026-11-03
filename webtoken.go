@@ -232,10 +232,11 @@ func cookieHeaders(req *http.Request, spDC string) {
 }
 
 // snippet 截断响应正文，用于错误信息。
+// snippet 把响应压成单行并截取前 200 个字符，用于错误信息与日志。
 func snippet(b []byte) string {
-	s := strings.TrimSpace(string(b))
-	if len(s) > 200 {
-		s = s[:200]
+	s := strings.Join(strings.Fields(string(b)), " ")
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "…"
 	}
 	return s
 }

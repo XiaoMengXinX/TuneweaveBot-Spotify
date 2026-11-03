@@ -232,3 +232,13 @@ func TestWebTokenStepsAndTOTPWarning(t *testing.T) {
 type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSnippetSingleLine(t *testing.T) {
+	got := snippet([]byte("{\n  \"error\": {\n    \"status\": 401\n  }\n}\n"))
+	if got != `{ "error": { "status": 401 } }` {
+		t.Errorf("snippet = %q", got)
+	}
+	if long := snippet([]byte(strings.Repeat("字", 300))); len([]rune(long)) != 201 || !strings.HasSuffix(long, "…") {
+		t.Errorf("长响应应按字符截断，得到 %d 个字符", len([]rune(long)))
+	}
+}
