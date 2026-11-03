@@ -231,7 +231,6 @@ func cookieHeaders(req *http.Request, spDC string) {
 	req.Header.Set("Accept", "application/json")
 }
 
-// snippet 截断响应正文，用于错误信息。
 // snippet 把响应压成单行并截取前 200 个字符，用于错误信息与日志。
 func snippet(b []byte) string {
 	s := strings.Join(strings.Fields(string(b)), " ")
